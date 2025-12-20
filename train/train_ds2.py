@@ -29,6 +29,9 @@ from transformers import (
 from safetensors.torch import save_file
 import shutil
 from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
+import os
+
+os.environ["WANDB_API_KEY"] = "86ab58d2a525a27f7a60ab5fa492d36bdf932255"
 
 def parse_args():
     """Parses command-line arguments for model paths and server configuration."""
@@ -87,6 +90,7 @@ def main():
         project_dir=ARGS.output_dir,
     )
     torch.cuda.set_device(accelerator.device)
+    accelerator.init_trackers("ds2_kontext", config=vars(ARGS))
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -139,6 +143,9 @@ def main():
     # 检查可训练参数
     trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
     trainable_named_params = [n for n, p in dit.named_parameters() if p.requires_grad]
+    if accelerator.is_main_process:
+        logger.info("Here are the trainable params")
+        logger.info(trainable_named_params)
 
     # 设置优化器
     lr = ARGS.lr
@@ -149,19 +156,14 @@ def main():
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # Prepare with accelerator
-    print("before prepare................................")
     accelerator.wait_for_everyone()
     dit, optimizer, dataloader= accelerator.prepare(dit, optimizer, dataloader)
-    print("after prepare................................")
 
     # 训练循环
     logger.info("***** Running training *****")
-    print("********Running training**********")
     num_epochs = ARGS.num_epochs
     global_step = 0
     save_steps = ARGS.save_steps
-
-
 
     weight_dtype = torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float32
     for epoch in range(num_epochs):
@@ -264,6 +266,10 @@ def main():
                 logger.info(f"Step {global_step}, Loss: {loss.item():.4f}")
 
                 if global_step % save_steps == 0:
+                    save_path = os.path.join(ARGS.output_dir, f"checkpoint-{global_step}")
+                    os.makedirs(save_path, exist_ok=True)
+                    # accelerator.save_state(save_path)
+
                     if accelerator.is_main_process:
                         if ARGS.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(ARGS.output_dir)
@@ -283,8 +289,6 @@ def main():
                                     removing_checkpoint = os.path.join(ARGS.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(ARGS.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
                         unwrapped_model_state = accelerator.unwrap_model(dit).state_dict()
                         lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if '_lora' in k}
                         save_file(
