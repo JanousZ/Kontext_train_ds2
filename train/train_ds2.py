@@ -4,18 +4,13 @@ Training script for Kontext model with DeepSpeed and Accelerate
 """
 
 import torch
-import torch.distributed as dist
 from torch.optim import AdamW
 from accelerate import Accelerator
 from peft import get_peft_model, LoraConfig
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 import argparse
-import numpy as np
 from my_datasets.replace5k import Replace5kDataset
 from torch.utils.data import DataLoader
 import os
-import torch.nn as nn
-from accelerate.utils import ProjectConfiguration
 import logging
 from accelerate.logging import get_logger
 import diffusers
@@ -31,31 +26,13 @@ from transformers import (
     T5TokenizerFast,
     is_wandb_available
 )
-from tqdm import tqdm
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from safetensors.torch import save_file
 import shutil
 from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
 
-if is_wandb_available():
-    import wandb
-logger = get_logger(__name__, log_level="INFO")
-
 def parse_args():
     """Parses command-line arguments for model paths and server configuration."""
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--vlm_path", 
-        type=str, 
-        default="/home/yanzhang/models/DreamOmni2/vlm-model", 
-        help="Path to the VLM model directory."
-    )
-    parser.add_argument(
-        "--edit_lora_path", 
-        type=str, 
-        default="/home/yanzhang/models/DreamOmni2/edit_lora", 
-        help="Path to the FLUX.1-Kontext editing LoRA weights directory."
-    )
     parser.add_argument(
         "--base_model_path", 
         type=str, 
@@ -66,7 +43,7 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=float, default=32)
     parser.add_argument("--num_epochs", type=int, default=1000)
     parser.add_argument("--output_dir", type=str, default="./lora_ckpt")
-    parser.add_argument("--logging_dir", type=str, default="./logs")
+    parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     # parser.add_argument("--mixed_precision", type=str, default="bf16")
     parser.add_argument("--max_train_steps", type=int, default=1000000)
@@ -77,95 +54,6 @@ def parse_args():
     parser.add_argument("--checkpoints_total_limit", type=int, default=5)
     args = parser.parse_args()
     return args
-
-ARGS = parse_args()
-logging_dir = os.path.join(ARGS.output_dir, ARGS.logging_dir)
-
-# 初始化分布式环境
-accelerator = Accelerator(
-    gradient_accumulation_steps=ARGS.gradient_accumulation_steps,
-    log_with=ARGS.report_to if ARGS.report_to != "none" else None,
-    project_dir=ARGS.output_dir,
-)
-torch.cuda.set_device(accelerator.device)
-
-# Make one log on every process with the configuration for debugging.
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    level=logging.INFO,
-)
-logger.info(accelerator.state, main_process_only=False)
-if accelerator.is_local_main_process:
-    datasets.utils.logging.set_verbosity_warning()
-    transformers.utils.logging.set_verbosity_warning()
-    diffusers.utils.logging.set_verbosity_info()
-else:
-    datasets.utils.logging.set_verbosity_error()
-    transformers.utils.logging.set_verbosity_error()
-    diffusers.utils.logging.set_verbosity_error()
-
-if accelerator.is_main_process:
-    if ARGS.output_dir is not None:
-        os.makedirs(ARGS.output_dir, exist_ok=True)
-
-# 加载预训练模型
-base_model = ARGS.base_model_path
-
-dit = FluxTransformer2DModel.from_pretrained(base_model, subfolder="transformer")
-vae = AutoencoderKL.from_pretrained(base_model, subfolder="vae")
-t5 = T5EncoderModel.from_pretrained(base_model, subfolder="text_encoder_2")
-clip = CLIPTextModel.from_pretrained(base_model, subfolder="text_encoder")
-t5_tokenizer = T5TokenizerFast.from_pretrained(base_model, subfolder="tokenizer_2")
-clip_tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
-
-# # 修复DS3 bug
-# clip.config.max_position_embeddings = 77  # CLIP的标准值
-# clip.config.hidden_size = 768  # CLIP的标准隐藏层大小
-# t5.config.d_model = 4096  # T5的标准值
-
-t5 = t5.to(accelerator.device)
-clip = clip.to(accelerator.device)
-vae = vae.to(accelerator.device)
-
-vae.requires_grad_(False)
-t5.requires_grad_(False)
-clip.requires_grad_(False)
-dit.requires_grad_(False)
-
-# 注入 LoRA 层
-lora_rank = ARGS.lora_rank
-lora_alpha = ARGS.lora_alpha
-lora_config = LoraConfig(
-    r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v"], lora_dropout=0.05
-)
-dit.add_adapter(lora_config, adapter_name="edit")
-dit.enable_gradient_checkpointing()
-
-# 检查可训练参数
-trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
-trainable_named_params = [n for n, p in dit.named_parameters() if p.requires_grad]
-
-# 设置优化器
-lr = ARGS.lr
-optimizer = AdamW(trainable_params, lr=lr)
-
-# 加载数据 
-dataset = Replace5kDataset(json_file="/home/yanzhang/datasets/replace-5k/train.json")
-dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
-
-# Prepare with accelerator
-print("before prepare................................")
-accelerator.wait_for_everyone()
-dit, optimizer, dataloader= accelerator.prepare(dit, optimizer, dataloader)
-print("after prepare................................")
-
-# 训练循环
-logger.info("***** Running training *****")
-print("********Running training**********")
-num_epochs = ARGS.num_epochs
-global_step = 0
-save_steps = ARGS.save_steps
 
 # Helper functions
 def _pack_latents(latents, batch_size, num_channels_latents, height, width):
@@ -184,162 +72,232 @@ def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
     )
     return latent_image_ids.to(device=device, dtype=dtype)
 
-# def _encode_prompt_with_clip(text_encoder, tokenizer, prompt, device):
-#     text_inputs = tokenizer(
-#         prompt,
-#         padding="max_length",
-#         max_length=tokenizer.model_max_length,
-#         truncation=True,
-#         return_tensors="pt",
-#     )
-#     text_input_ids = text_inputs.input_ids
-#     prompt_embeds = text_encoder(text_input_ids.to(device), return_dict=False)[0]
-#     return prompt_embeds
+if is_wandb_available():
+    import wandb
+logger = get_logger(__name__, log_level="INFO")
 
-# def _encode_prompt_with_t5(text_encoder, tokenizer, prompt, device):
-#     text_inputs = tokenizer(
-#         prompt,
-#         padding="max_length",
-#         max_length=tokenizer.model_max_length,
-#         truncation=True,
-#         return_tensors="pt",
-#     )
-#     text_input_ids = text_inputs.input_ids
-#     prompt_embeds = text_encoder(text_input_ids.to(device), return_dict=False)[0]
-#     return prompt_embeds
+def main():
+    ARGS = parse_args()
+    logging_dir = os.path.join(ARGS.output_dir, ARGS.logging_dir)
 
-weight_dtype = torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float32
-for epoch in range(num_epochs):
-    for step, batch in enumerate(dataloader):
-        with accelerator.accumulate(dit):
-            instructions = batch["prompt"]
-            src_images = batch["src_image"].to(accelerator.device)
-            ref_images = batch["ref_image"].to(accelerator.device)
-            tgt_images = batch["tgt_image"].to(accelerator.device)
-            batch_size = src_images.shape[0]
+    # 初始化分布式环境
+    accelerator = Accelerator(
+        gradient_accumulation_steps=ARGS.gradient_accumulation_steps,
+        log_with=ARGS.report_to if ARGS.report_to != "none" else None,
+        project_dir=ARGS.output_dir,
+    )
+    torch.cuda.set_device(accelerator.device)
 
-            with torch.no_grad():
-                prompts = instructions
-                
-                # 获取文本embedding & tokens
-                pooled_prompt_embeds = _encode_prompt_with_clip(
-                    text_encoder=clip,
-                    tokenizer=clip_tokenizer,
-                    prompt=prompts,
-                    device=accelerator.device,
-                )
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
 
-                prompt_embeds = _encode_prompt_with_t5(
-                    text_encoder=t5,
-                    tokenizer=t5_tokenizer,
-                    prompt=prompts,
-                    device=accelerator.device,
-                )
-                text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=accelerator.device, dtype=clip.dtype)
-                
-                # image encode
-                height = 1024
-                width = 1024
-                num_channels_latents = dit.module.config.in_channels // 4
-                src_image_latents = (vae.encode(src_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                ref_image_latents = (vae.encode(ref_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                tgt_image_latents = (vae.encode(tgt_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                image_latent_height, image_latent_width = src_image_latents.shape[2:]
-                src_image_latents = _pack_latents(
-                    src_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
-                )
-                ref_image_latents = _pack_latents(
-                    ref_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
-                )
-                tgt_image_latents = _pack_latents(
-                    tgt_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
-                )
-                src_image_ids = _prepare_latent_image_ids(
-                    batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
-                )
-                ref_image_ids = _prepare_latent_image_ids(
-                    batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
-                )
-                tgt_image_ids = _prepare_latent_image_ids(
-                    batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
-                )
-                w_offset = image_latent_width // 2
-                src_image_ids[..., 0] += 1
-                src_image_ids[..., 2] += w_offset
-                w_offset += image_latent_width // 2
-                ref_image_ids[..., 0] += 2
-                ref_image_ids[..., 2] += w_offset
-                
-                # timestep
-                t = torch.rand(batch_size, 1, 1, device=accelerator.device)
+    if accelerator.is_main_process:
+        if ARGS.output_dir is not None:
+            os.makedirs(ARGS.output_dir, exist_ok=True)
 
-                # sample & add_noise
-                x_1 = torch.randn_like(tgt_image_latents).to(accelerator.device)
-                x_t = (1 - t) * tgt_image_latents + t * x_1
+    # 加载预训练模型
+    base_model = ARGS.base_model_path
 
-            # denoise
-            latent_model_input = torch.cat([x_t, src_image_latents, ref_image_latents], dim=1)
-            latent_ids = torch.cat([tgt_image_ids, src_image_ids, ref_image_ids], dim=0)
-            guidance = torch.full((x_t.shape[0],), 1, device=x_t.device)
+    dit = FluxTransformer2DModel.from_pretrained(base_model, subfolder="transformer")
+    vae = AutoencoderKL.from_pretrained(base_model, subfolder="vae")
+    t5 = T5EncoderModel.from_pretrained(base_model, subfolder="text_encoder_2")
+    clip = CLIPTextModel.from_pretrained(base_model, subfolder="text_encoder")
+    t5_tokenizer = T5TokenizerFast.from_pretrained(base_model, subfolder="tokenizer_2")
+    clip_tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
 
-            noise_pred = dit(
-                hidden_states=latent_model_input.to(dtype=weight_dtype),
-                timestep=t.squeeze(1).squeeze(1).to(dtype=weight_dtype),
-                guidance=guidance.to(dtype=weight_dtype),
-                pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
-                encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
-                txt_ids=text_ids.to(dtype=weight_dtype),
-                img_ids=latent_ids.to(dtype=weight_dtype),
-                return_dict=False,
-            )[0]
-            noise_pred = noise_pred[:, :x_t.size(1)]
+    t5 = t5.to(accelerator.device)
+    clip = clip.to(accelerator.device)
+    vae = vae.to(accelerator.device)
 
-            # loss
-            diff_loss = torch.nn.functional.mse_loss(noise_pred.float(), (x_1 - tgt_image_latents).float(), reduction="mean")
-            loss = diff_loss
+    vae.requires_grad_(False)
+    t5.requires_grad_(False)
+    clip.requires_grad_(False)
+    dit.requires_grad_(False)
 
-            accelerator.backward(loss)
-            optimizer.step()
-            optimizer.zero_grad()
-        
-        if accelerator.sync_gradients:
-            global_step += 1
-            if ARGS.report_to != "none":
-                accelerator.log({"loss": loss.item()}, step=global_step)
-            logger.info(f"Step {global_step}, Loss: {loss.item():.4f}")
+    # 注入 LoRA 层
+    lora_rank = ARGS.lora_rank
+    lora_alpha = ARGS.lora_alpha
+    lora_config = LoraConfig(
+        r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v"], lora_dropout=0.05
+    )
+    dit.add_adapter(lora_config, adapter_name="edit")
+    dit.enable_gradient_checkpointing()
 
-            if global_step % save_steps == 0:
-                if accelerator.is_main_process:
-                    if ARGS.checkpoints_total_limit is not None:
-                        checkpoints = os.listdir(ARGS.output_dir)
-                        checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                        checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+    # 检查可训练参数
+    trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
+    trainable_named_params = [n for n, p in dit.named_parameters() if p.requires_grad]
 
-                        if len(checkpoints) >= ARGS.checkpoints_total_limit:
-                            num_to_remove = len(checkpoints) - ARGS.checkpoints_total_limit + 1
-                            removing_checkpoints = checkpoints[0:num_to_remove]
+    # 设置优化器
+    lr = ARGS.lr
+    optimizer = AdamW(trainable_params, lr=lr)
 
-                            logger.info(
-                                f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                            )
-                            logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+    # 加载数据 
+    dataset = Replace5kDataset(json_file="/home/yanzhang/datasets/replace-5k/train.json")
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-                            for removing_checkpoint in removing_checkpoints:
-                                removing_checkpoint = os.path.join(ARGS.output_dir, removing_checkpoint)
-                                shutil.rmtree(removing_checkpoint)
+    # Prepare with accelerator
+    print("before prepare................................")
+    accelerator.wait_for_everyone()
+    dit, optimizer, dataloader= accelerator.prepare(dit, optimizer, dataloader)
+    print("after prepare................................")
 
-                    save_path = os.path.join(ARGS.output_dir, f"checkpoint-{global_step}")
-                    accelerator.save_state(save_path)
-                    unwrapped_model_state = accelerator.unwrap_model(dit).state_dict()
-                    lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if '_lora' in k}
-                    save_file(
-                        lora_state_dict,
-                        os.path.join(save_path, "lora.safetensors")
+    # 训练循环
+    logger.info("***** Running training *****")
+    print("********Running training**********")
+    num_epochs = ARGS.num_epochs
+    global_step = 0
+    save_steps = ARGS.save_steps
+
+
+
+    weight_dtype = torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float32
+    for epoch in range(num_epochs):
+        for step, batch in enumerate(dataloader):
+            with accelerator.accumulate(dit):
+                instructions = batch["prompt"]
+                src_images = batch["src_image"].to(accelerator.device)
+                ref_images = batch["ref_image"].to(accelerator.device)
+                tgt_images = batch["tgt_image"].to(accelerator.device)
+                batch_size = src_images.shape[0]
+
+                with torch.no_grad():
+                    prompts = instructions
+                    
+                    # 获取文本embedding & tokens
+                    pooled_prompt_embeds = _encode_prompt_with_clip(
+                        text_encoder=clip,
+                        tokenizer=clip_tokenizer,
+                        prompt=prompts,
+                        device=accelerator.device,
                     )
-                    logger.info(f"Saved state to {save_path}")
 
-        if global_step >= ARGS.max_train_steps:
-            break
+                    prompt_embeds = _encode_prompt_with_t5(
+                        text_encoder=t5,
+                        tokenizer=t5_tokenizer,
+                        prompt=prompts,
+                        device=accelerator.device,
+                    )
+                    text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=accelerator.device, dtype=clip.dtype)
+                    
+                    # image encode
+                    height = 1024
+                    width = 1024
+                    num_channels_latents = dit.module.config.in_channels // 4
+                    src_image_latents = (vae.encode(src_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    ref_image_latents = (vae.encode(ref_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    tgt_image_latents = (vae.encode(tgt_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    image_latent_height, image_latent_width = src_image_latents.shape[2:]
+                    src_image_latents = _pack_latents(
+                        src_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+                    )
+                    ref_image_latents = _pack_latents(
+                        ref_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+                    )
+                    tgt_image_latents = _pack_latents(
+                        tgt_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+                    )
+                    src_image_ids = _prepare_latent_image_ids(
+                        batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
+                    )
+                    ref_image_ids = _prepare_latent_image_ids(
+                        batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
+                    )
+                    tgt_image_ids = _prepare_latent_image_ids(
+                        batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
+                    )
+                    w_offset = image_latent_width // 2
+                    src_image_ids[..., 0] += 1
+                    src_image_ids[..., 2] += w_offset
+                    w_offset += image_latent_width // 2
+                    ref_image_ids[..., 0] += 2
+                    ref_image_ids[..., 2] += w_offset
+                    
+                    # timestep
+                    t = torch.rand(batch_size, 1, 1, device=accelerator.device)
 
-accelerator.wait_for_everyone()
-accelerator.end_training()
+                    # sample & add_noise
+                    x_1 = torch.randn_like(tgt_image_latents).to(accelerator.device)
+                    x_t = (1 - t) * tgt_image_latents + t * x_1
+
+                # denoise
+                latent_model_input = torch.cat([x_t, src_image_latents, ref_image_latents], dim=1)
+                latent_ids = torch.cat([tgt_image_ids, src_image_ids, ref_image_ids], dim=0)
+                guidance = torch.full((x_t.shape[0],), 1, device=x_t.device)
+
+                noise_pred = dit(
+                    hidden_states=latent_model_input.to(dtype=weight_dtype),
+                    timestep=t.squeeze(1).squeeze(1).to(dtype=weight_dtype),
+                    guidance=guidance.to(dtype=weight_dtype),
+                    pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
+                    encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
+                    txt_ids=text_ids.to(dtype=weight_dtype),
+                    img_ids=latent_ids.to(dtype=weight_dtype),
+                    return_dict=False,
+                )[0]
+                noise_pred = noise_pred[:, :x_t.size(1)]
+
+                # loss
+                diff_loss = torch.nn.functional.mse_loss(noise_pred.float(), (x_1 - tgt_image_latents).float(), reduction="mean")
+                loss = diff_loss
+
+                accelerator.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            if accelerator.sync_gradients:
+                global_step += 1
+                if ARGS.report_to != "none":
+                    accelerator.log({"loss": loss.item()}, step=global_step)
+                logger.info(f"Step {global_step}, Loss: {loss.item():.4f}")
+
+                if global_step % save_steps == 0:
+                    if accelerator.is_main_process:
+                        if ARGS.checkpoints_total_limit is not None:
+                            checkpoints = os.listdir(ARGS.output_dir)
+                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                            if len(checkpoints) >= ARGS.checkpoints_total_limit:
+                                num_to_remove = len(checkpoints) - ARGS.checkpoints_total_limit + 1
+                                removing_checkpoints = checkpoints[0:num_to_remove]
+
+                                logger.info(
+                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                )
+                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                                for removing_checkpoint in removing_checkpoints:
+                                    removing_checkpoint = os.path.join(ARGS.output_dir, removing_checkpoint)
+                                    shutil.rmtree(removing_checkpoint)
+
+                        save_path = os.path.join(ARGS.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        unwrapped_model_state = accelerator.unwrap_model(dit).state_dict()
+                        lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if '_lora' in k}
+                        save_file(
+                            lora_state_dict,
+                            os.path.join(save_path, "lora.safetensors")
+                        )
+                        logger.info(f"Saved state to {save_path}")
+
+            if global_step >= ARGS.max_train_steps:
+                break
+
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
+
+if __name__ == "__main__":
+    main()
