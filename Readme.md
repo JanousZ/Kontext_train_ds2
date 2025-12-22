@@ -1,4 +1,5 @@
 export NCCL_P2P_DISABLE=1
+cd Kontext_train_ds2
 accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2.py --num_epochs 100 --lr 1e-4 --save_steps 500
 
 #异步错误处理
@@ -23,3 +24,7 @@ export NCCL_IB_DISABLE=1
 
 指定 NCCL 通信使用的物理网卡名称
 export NCCL_SOCKET_IFNAME=ens9f0
+
+#断点重续
+accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2.py --num_epochs 100 --lr 1e-4 --save_steps 500 \
+                  --resume_lora_path "./lora_ckpt/checkpoint-4000/lora.safetensors"

@@ -26,7 +26,7 @@ from transformers import (
     T5TokenizerFast,
     is_wandb_available
 )
-from safetensors.torch import save_file
+from safetensors.torch import save_file, load_file
 import shutil
 from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
 import os
@@ -55,6 +55,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--checkpoints_total_limit", type=int, default=5)
+    parser.add_argument("--resume_lora_path", type=str, default=None)
     args = parser.parse_args()
     return args
 
@@ -138,7 +139,16 @@ def main():
         r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v"], lora_dropout=0.05
     )
     dit.add_adapter(lora_config, adapter_name="edit")
+
+    # 断点重训
+    if ARGS.resume_lora_path is not None:
+        resume_lora_path = ARGS.resume_lora_path
+        lora_weights = load_file(resume_lora_path)
+        missing_keys, unexpected_keys = dit.load_state_dict(lora_weights, strict=False)
+        logger.info(f"unexpected_lora_keys:{unexpected_keys}")
+        logger.info("successfully resume lora")
     dit.enable_gradient_checkpointing()
+    dit.train()
 
     # 检查可训练参数
     trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
