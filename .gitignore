@@ -1,2 +1,4 @@
 wandb/
 lora_ckpt/
+test.py
+pipeline_dreamomni2.py

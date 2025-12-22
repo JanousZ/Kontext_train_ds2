@@ -8,11 +8,11 @@ import cv2
 import torch
 
 class Replace5kDataset(Dataset):
-    def __init__(self, json_file):
+    def __init__(self, json_file, read_mode = "PIL", is_image_preprocess = True):
         with open(json_file, "r", encoding="utf-8") as f:
             self.image_dirs = json.load(f)
-        self.read_mode = "PIL"
-        self.is_image_preprocess = True
+        self.read_mode = read_mode
+        self.is_image_preprocess = is_image_preprocess
 
     def __len__(self):
         return len(self.image_dirs)

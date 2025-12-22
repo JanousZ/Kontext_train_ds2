@@ -300,7 +300,7 @@ def main():
                                     shutil.rmtree(removing_checkpoint)
 
                         unwrapped_model_state = accelerator.unwrap_model(dit).state_dict()
-                        lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if '_lora' in k}
+                        lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if 'lora' in k}
                         save_file(
                             lora_state_dict,
                             os.path.join(save_path, "lora.safetensors")
