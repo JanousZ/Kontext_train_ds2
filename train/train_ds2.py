@@ -44,17 +44,15 @@ def parse_args():
     )
     parser.add_argument("--lora_rank", type=int, default=32)
     parser.add_argument("--lora_alpha", type=float, default=32)
-    parser.add_argument("--num_epochs", type=int, default=1000)
+    parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--output_dir", type=str, default="./lora_ckpt")
     parser.add_argument("--logging_dir", type=str, default="logs")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    # parser.add_argument("--mixed_precision", type=str, default="bf16")
     parser.add_argument("--max_train_steps", type=int, default=1000000)
     parser.add_argument("--report_to", type=str, default="wandb")
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--checkpoints_total_limit", type=int, default=5)
+    parser.add_argument("--checkpoints_total_limit", type=int, default=10)
     parser.add_argument("--resume_lora_path", type=str, default=None)
     args = parser.parse_args()
     return args
@@ -86,7 +84,6 @@ def main():
 
     # 初始化分布式环境
     accelerator = Accelerator(
-        gradient_accumulation_steps=ARGS.gradient_accumulation_steps,
         log_with=ARGS.report_to if ARGS.report_to != "none" else None,
         project_dir=ARGS.output_dir,
     )
@@ -132,6 +129,12 @@ def main():
     clip.requires_grad_(False)
     dit.requires_grad_(False)
 
+    vae.eval()
+    t5.eval()
+    clip.eval()
+    dit.train()
+    dit.enable_gradient_checkpointing()
+
     # 注入 LoRA 层
     lora_rank = ARGS.lora_rank
     lora_alpha = ARGS.lora_alpha
@@ -147,8 +150,6 @@ def main():
         missing_keys, unexpected_keys = dit.load_state_dict(lora_weights, strict=False)
         logger.info(f"unexpected_lora_keys:{unexpected_keys}")
         logger.info("successfully resume lora")
-    dit.enable_gradient_checkpointing()
-    dit.train()
 
     # 检查可训练参数
     trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
@@ -168,6 +169,7 @@ def main():
     # Prepare with accelerator
     accelerator.wait_for_everyone()
     dit, optimizer, dataloader= accelerator.prepare(dit, optimizer, dataloader)
+    dit.train()
 
     # 训练循环
     logger.info("***** Running training *****")
@@ -202,15 +204,14 @@ def main():
                         prompt=prompts,
                         device=accelerator.device,
                     )
+
                     text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=accelerator.device, dtype=clip.dtype)
                     
                     # image encode
-                    height = 1024
-                    width = 1024
                     num_channels_latents = dit.module.config.in_channels // 4
-                    src_image_latents = (vae.encode(src_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                    ref_image_latents = (vae.encode(ref_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                    tgt_image_latents = (vae.encode(tgt_images).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    src_image_latents = (vae.encode(src_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    ref_image_latents = (vae.encode(ref_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
+                    tgt_image_latents = (vae.encode(tgt_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
                     image_latent_height, image_latent_width = src_image_latents.shape[2:]
                     src_image_latents = _pack_latents(
                         src_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
@@ -231,10 +232,10 @@ def main():
                         batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
                     )
                     w_offset = image_latent_width // 2
-                    src_image_ids[..., 0] += 1
+                    src_image_ids[..., 0] = 1
                     src_image_ids[..., 2] += w_offset
                     w_offset += image_latent_width // 2
-                    ref_image_ids[..., 0] += 2
+                    ref_image_ids[..., 0] = 2
                     ref_image_ids[..., 2] += w_offset
                     
                     # timestep
@@ -251,8 +252,8 @@ def main():
 
                 noise_pred = dit(
                     hidden_states=latent_model_input.to(dtype=weight_dtype),
-                    timestep=t.squeeze(1).squeeze(1).to(dtype=weight_dtype),
-                    guidance=guidance.to(dtype=weight_dtype),
+                    timestep=t.squeeze(1).squeeze(1).to(dtype=weight_dtype),     #[0,1]
+                    guidance=guidance.to(dtype=weight_dtype),     #[1.0]
                     pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
                     encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
                     txt_ids=text_ids.to(dtype=weight_dtype),
@@ -300,7 +301,7 @@ def main():
                                     shutil.rmtree(removing_checkpoint)
 
                         unwrapped_model_state = accelerator.unwrap_model(dit).state_dict()
-                        lora_state_dict = {k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if 'lora' in k}
+                        lora_state_dict = {"transformer." + k: unwrapped_model_state[k] for k in unwrapped_model_state.keys() if 'lora' in k}
                         save_file(
                             lora_state_dict,
                             os.path.join(save_path, "lora.safetensors")

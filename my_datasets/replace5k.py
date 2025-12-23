@@ -25,6 +25,7 @@ class Replace5kDataset(Dataset):
         img = np.array(img)
         img = img.astype(np.float32) / 127.5 - 1.0  # -> [-1,1]
         img = torch.from_numpy(img).permute(2, 0, 1)  # -> [C,H,W]
+        img = img.to(dtype=torch.float32)
         return img
 
     def get_sample(self, idx):
