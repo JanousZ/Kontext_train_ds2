@@ -30,6 +30,7 @@ from safetensors.torch import save_file, load_file
 import shutil
 from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
 import os
+import math
 
 os.environ["WANDB_API_KEY"] = "86ab58d2a525a27f7a60ab5fa492d36bdf932255"
 
@@ -73,6 +74,10 @@ def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
         latent_image_id_height * latent_image_id_width, latent_image_id_channels
     )
     return latent_image_ids.to(device=device, dtype=dtype)
+
+def time_shift(mu: float, sigma: float, t: torch.Tensor):
+    # Flux 推荐的 shift 逻辑
+    return math.exp(mu) * t / (1 + (math.exp(mu) - 1) * t)
 
 if is_wandb_available():
     import wandb
@@ -139,7 +144,7 @@ def main():
     lora_rank = ARGS.lora_rank
     lora_alpha = ARGS.lora_alpha
     lora_config = LoraConfig(
-        r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v"], lora_dropout=0.05
+        r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v", "to_k", "to_out.0"], lora_dropout=0.05
     )
     dit.add_adapter(lora_config, adapter_name="edit")
 
@@ -153,10 +158,6 @@ def main():
 
     # 检查可训练参数
     trainable_params = [p for n, p in dit.named_parameters() if p.requires_grad]
-    trainable_named_params = [n for n, p in dit.named_parameters() if p.requires_grad]
-    if accelerator.is_main_process:
-        logger.info("Here are the trainable params")
-        logger.info(trainable_named_params)
 
     # 设置优化器
     lr = ARGS.lr
@@ -170,6 +171,11 @@ def main():
     accelerator.wait_for_everyone()
     dit, optimizer, dataloader= accelerator.prepare(dit, optimizer, dataloader)
     dit.train()
+
+    trainable_named_params = [n for n, p in dit.named_parameters() if p.requires_grad]
+    if accelerator.is_main_process:
+        logger.info("Here are the trainable params")
+        logger.info(trainable_named_params)
 
     # 训练循环
     logger.info("***** Running training *****")
@@ -233,13 +239,14 @@ def main():
                     )
                     w_offset = image_latent_width // 2
                     src_image_ids[..., 0] = 1
-                    src_image_ids[..., 2] += w_offset
+                    # src_image_ids[..., 2] += w_offset
                     w_offset += image_latent_width // 2
                     ref_image_ids[..., 0] = 2
-                    ref_image_ids[..., 2] += w_offset
+                    # ref_image_ids[..., 2] += w_offset
                     
                     # timestep
-                    t = torch.rand(batch_size, 1, 1, device=accelerator.device)
+                    t_raw = torch.rand(batch_size, 1, 1, device=accelerator.device)   # 可能要加time shift
+                    t = time_shift(mu=3, sigma=0, t=t_raw)
 
                     # sample & add_noise
                     x_1 = torch.randn_like(tgt_image_latents).to(accelerator.device)
