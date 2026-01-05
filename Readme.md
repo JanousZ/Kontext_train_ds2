@@ -61,6 +61,7 @@ loss的稳定值比之前从0.14下降到0.1以下，但是出图还是模糊噪
 
 问题4：如果我们用回0号卡去跑，是否会出现Dreamomni的类似问题？
 又没有这个问题了。那么那是DreamOmni2本身的问题吗？I Don't know.
-
-
-
+发现了是balanced模式下的问题！！！！
+尝试4：我对Flux-Kontext代码进行了调试，发现了balanced模式下，两个text encoder被分到了不同地方，导致device不统一，t5的编码输出为空，所以出噪声
+结论4：不要用balanced模式，如果要分配请自己调整device
+尝试5：对Qwen-Image-Edit进行同样调试，发现同样的问题，所以不可以使用balanced模式
