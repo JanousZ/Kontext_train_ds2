@@ -4,6 +4,8 @@ unset https_proxy
 cd Kontext_train_ds2
 accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2.py --num_epochs 5 --lr 1e-4 --save_steps 500
 
+accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_motionedit.py --num_epochs 5 --lr 1e-4 --save_steps 500
+
 #异步错误处理
 当一个 GPU 节点发生 NCCL 错误时，其他节点能及时收到通知并优雅退出，而不是一直死等（卡死）。它让错误日志更清晰。
 export NCCL_ASYNC_ERROR_HANDLING=1    
@@ -60,8 +62,11 @@ loss的稳定值比之前从0.14下降到0.1以下，但是出图还是模糊噪
 最后，我们使用训练时的导入lora方式，对lora进行一个导入，就可以了。
 
 问题4：如果我们用回0号卡去跑，是否会出现Dreamomni的类似问题？
-又没有这个问题了。那么那是DreamOmni2本身的问题吗？I Don't know.
+又没有这个问题了。那么那是DreamOmni2本身的问题吗？
 发现了是balanced模式下的问题！！！！
+
 尝试4：我对Flux-Kontext代码进行了调试，发现了balanced模式下，两个text encoder被分到了不同地方，导致device不统一，t5的编码输出为空，所以出噪声
 结论4：不要用balanced模式，如果要分配请自己调整device
+
 尝试5：对Qwen-Image-Edit进行同样调试，发现同样的问题，所以不可以使用balanced模式
+解决办法：pipeline.enable_model_cpu_offload(gpu_id = gpu_id)，可以节省推理时的gpu显存使用

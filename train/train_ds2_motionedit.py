@@ -93,7 +93,7 @@ def main():
         project_dir=ARGS.output_dir,
     )
     torch.cuda.set_device(accelerator.device)
-    accelerator.init_trackers("ds2_kontext", config=vars(ARGS))
+    accelerator.init_trackers("motion_edit", config=vars(ARGS))
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
