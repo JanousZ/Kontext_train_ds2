@@ -1,3 +1,4 @@
+deepspeed2 + accelerate训练 flux kontext lora（实验性）
 export NCCL_P2P_DISABLE=1
 unset http_proxy
 unset https_proxy
