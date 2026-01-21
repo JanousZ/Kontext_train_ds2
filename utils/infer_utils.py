@@ -1,5 +1,6 @@
 import os
 import torch
+from typing import List, Union, Optional
 def tokenize_prompt(tokenizer, prompt, max_sequence_length):
     text_inputs = tokenizer(
         prompt,
@@ -162,3 +163,69 @@ def get_sigmas(noise_scheduler_copy,accelerator, timesteps, n_dim=4, dtype=torch
     while len(sigma.shape) < n_dim:
         sigma = sigma.unsqueeze(-1)
     return sigma
+
+def _get_qwen_prompt_embeds(
+        prompt: Union[str, List[str]] = None,
+        image: Optional[torch.Tensor] = None,
+        text_encoder = None,
+        processor = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+    device = device
+    dtype = dtype or text_encoder.dtype
+
+    prompt = [prompt] if isinstance(prompt, str) else prompt
+    img_prompt_template = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+    if isinstance(image, list):
+        base_img_prompt = ""
+        for i, img in enumerate(image):
+            base_img_prompt += img_prompt_template.format(i + 1)
+    elif image is not None:
+        base_img_prompt = img_prompt_template.format(1)
+    else:
+        base_img_prompt = ""
+
+    template = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+
+    drop_idx = 64
+    txt = [template.format(base_img_prompt + e) for e in prompt]
+
+    model_inputs = processor(
+        text=txt,
+        images=image,
+        padding=True,
+        return_tensors="pt",
+    ).to(device)
+
+    outputs = text_encoder(
+        input_ids=model_inputs.input_ids,
+        attention_mask=model_inputs.attention_mask,
+        pixel_values=model_inputs.pixel_values,
+        image_grid_thw=model_inputs.image_grid_thw,
+        output_hidden_states=True,
+    )
+
+    def _extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor):
+        bool_mask = mask.bool()
+        valid_lengths = bool_mask.sum(dim=1)
+        selected = hidden_states[bool_mask]
+        split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
+
+        return split_result
+
+    hidden_states = outputs.hidden_states[-1]
+    split_hidden_states = _extract_masked_hidden(hidden_states, model_inputs.attention_mask)
+    split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+    attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+    max_seq_len = max([e.size(0) for e in split_hidden_states])
+    prompt_embeds = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
+    )
+    encoder_attention_mask = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
+    )
+
+    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+
+    return prompt_embeds, encoder_attention_mask

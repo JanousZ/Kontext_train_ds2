@@ -8,7 +8,7 @@ from torch.optim import AdamW
 from accelerate import Accelerator
 from peft import get_peft_model, LoraConfig
 import argparse
-from my_datasets.replace5k import Replace5kDataset
+from my_datasets.motionedit import MotionEditDataset
 from torch.utils.data import DataLoader
 import os
 import logging
@@ -17,6 +17,8 @@ import diffusers
 import datasets
 import transformers
 from diffusers.models import AutoencoderKL, FluxTransformer2DModel
+from diffusers.models.transformers import QwenImageTransformer2DModel
+from diffusers.models import AutoencoderKLQwenImage
 from transformers import (
     CLIPImageProcessor,
     CLIPTextModel,
@@ -24,11 +26,14 @@ from transformers import (
     CLIPVisionModelWithProjection,
     T5EncoderModel,
     T5TokenizerFast,
+    Qwen2Tokenizer,
+    Qwen2VLProcessor,
+    Qwen2_5_VLForConditionalGeneration,
     is_wandb_available
 )
 from safetensors.torch import save_file, load_file
 import shutil
-from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
+from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5, _get_qwen_prompt_embeds
 import os
 import math
 
@@ -40,8 +45,9 @@ def parse_args():
     parser.add_argument(
         "--base_model_path", 
         type=str, 
-        default="/mnt/disk1/models/FLUX.1-Kontext-dev", 
-        help="Path to the FLUX.1-Kontext editing."
+        # default="/home/yanzhang/models/FLUX.1-Kontext-dev", 
+        default="/mnt/disk1/models/Qwen/Qwen-Image-Edit-2511",
+        help="Path to the Image Edit model."
     )
     parser.add_argument("--lora_rank", type=int, default=32)
     parser.add_argument("--lora_alpha", type=float, default=32)
@@ -93,7 +99,8 @@ def main():
         project_dir=ARGS.output_dir,
     )
     torch.cuda.set_device(accelerator.device)
-    accelerator.init_trackers("ds2_kontext", config=vars(ARGS))
+    device = accelerator.device
+    accelerator.init_trackers("motion_edit", config=vars(ARGS))
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -118,25 +125,21 @@ def main():
     # 加载预训练模型
     base_model = ARGS.base_model_path
 
-    dit = FluxTransformer2DModel.from_pretrained(base_model, subfolder="transformer")
-    vae = AutoencoderKL.from_pretrained(base_model, subfolder="vae")
-    t5 = T5EncoderModel.from_pretrained(base_model, subfolder="text_encoder_2")
-    clip = CLIPTextModel.from_pretrained(base_model, subfolder="text_encoder")
-    t5_tokenizer = T5TokenizerFast.from_pretrained(base_model, subfolder="tokenizer_2")
-    clip_tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
+    dit = QwenImageTransformer2DModel.from_pretrained(base_model, subfolder="transformer", low_cpu_mem_usage=True)
+    vae = AutoencoderKLQwenImage.from_pretrained(base_model, subfolder="vae")
+    text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(base_model, subfolder="text_encoder")
+    tokenizer = Qwen2Tokenizer.from_pretrained(base_model, subfolder="tokenizer")
+    processor = Qwen2VLProcessor.from_pretrained(base_model, subfolder="processor")
 
-    t5 = t5.to(accelerator.device)
-    clip = clip.to(accelerator.device)
+    text_encoder = text_encoder.to(accelerator.device)
     vae = vae.to(accelerator.device)
 
     vae.requires_grad_(False)
-    t5.requires_grad_(False)
-    clip.requires_grad_(False)
+    text_encoder.requires_grad_(False)
     dit.requires_grad_(False)
 
     vae.eval()
-    t5.eval()
-    clip.eval()
+    text_encoder.eval()
     dit.train()
     dit.enable_gradient_checkpointing()
 
@@ -144,7 +147,10 @@ def main():
     lora_rank = ARGS.lora_rank
     lora_alpha = ARGS.lora_alpha
     lora_config = LoraConfig(
-        r=lora_rank, lora_alpha=lora_alpha, target_modules=["to_q", "to_v", "to_k", "to_out.0"], lora_dropout=0.05
+        r=lora_rank, 
+        lora_alpha=lora_alpha, 
+        target_modules=["to_q", "to_v", "to_k", "to_out.0"],    # 还需要把模型打印出来并斟酌
+        lora_dropout=0.05
     )
     dit.add_adapter(lora_config, adapter_name="edit")
 
@@ -164,7 +170,13 @@ def main():
     optimizer = AdamW(trainable_params, lr=lr)
 
     # 加载数据 
-    dataset = Replace5kDataset(json_file="/home/yanzhang/datasets/replace-5k/train.json")
+    dataset = MotionEditDataset(files_path=["/home/yanzhang/datasets/motionedit/train-00000-of-00006.parquet",
+                                            "/home/yanzhang/datasets/motionedit/train-00001-of-00006.parquet",
+                                            "/home/yanzhang/datasets/motionedit/train-00002-of-00006.parquet",
+                                            "/home/yanzhang/datasets/motionedit/train-00003-of-00006.parquet",
+                                            "/home/yanzhang/datasets/motionedit/train-00004-of-00006.parquet",
+                                            "/home/yanzhang/datasets/motionedit/train-00005-of-00006.parquet",
+                                            ])
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # Prepare with accelerator
@@ -188,27 +200,20 @@ def main():
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(dit):
                 instructions = batch["prompt"]
-                src_images = batch["src_image"].to(accelerator.device)
-                ref_images = batch["ref_image"].to(accelerator.device)
-                tgt_images = batch["tgt_image"].to(accelerator.device)
+                src_images = batch["input_image"].to(accelerator.device)
+                tgt_images = batch["target_image"].to(accelerator.device)
                 batch_size = src_images.shape[0]
 
                 with torch.no_grad():
                     prompts = instructions
                     
                     # 获取文本embedding & tokens
-                    pooled_prompt_embeds = _encode_prompt_with_clip(
-                        text_encoder=clip,
-                        tokenizer=clip_tokenizer,
-                        prompt=prompts,
-                        device=accelerator.device,
-                    )
-
-                    prompt_embeds = _encode_prompt_with_t5(
-                        text_encoder=t5,
-                        tokenizer=t5_tokenizer,
-                        prompt=prompts,
-                        device=accelerator.device,
+                    prompt_embeds, prompt_embeds_mask = _get_qwen_prompt_embeds(
+                        prompt = prompts,
+                        image = src_images,   
+                        text_encoder = text_encoder,
+                        processor = processor,
+                        device = accelerator.device,
                     )
 
                     text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=accelerator.device, dtype=clip.dtype)
@@ -216,22 +221,15 @@ def main():
                     # image encode
                     num_channels_latents = dit.module.config.in_channels // 4
                     src_image_latents = (vae.encode(src_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
-                    ref_image_latents = (vae.encode(ref_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
                     tgt_image_latents = (vae.encode(tgt_images.float()).latent_dist.sample() - vae.config.shift_factor) * vae.config.scaling_factor
                     image_latent_height, image_latent_width = src_image_latents.shape[2:]
                     src_image_latents = _pack_latents(
                         src_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
                     )
-                    ref_image_latents = _pack_latents(
-                        ref_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
-                    )
                     tgt_image_latents = _pack_latents(
                         tgt_image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
                     )
                     src_image_ids = _prepare_latent_image_ids(
-                        batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
-                    )
-                    ref_image_ids = _prepare_latent_image_ids(
                         batch_size, image_latent_height // 2, image_latent_width // 2, accelerator.device, prompt_embeds.dtype
                     )
                     tgt_image_ids = _prepare_latent_image_ids(
@@ -240,31 +238,26 @@ def main():
                     w_offset = image_latent_width // 2
                     src_image_ids[..., 0] = 1
                     # src_image_ids[..., 2] += w_offset
-                    w_offset += image_latent_width // 2
-                    ref_image_ids[..., 0] = 2
-                    # ref_image_ids[..., 2] += w_offset
                     
                     # timestep
-                    t_raw = torch.rand(batch_size, 1, 1, device=accelerator.device)   # 可能要加time shift
-                    t = time_shift(mu=3, sigma=0, t=t_raw)
+                    t_raw = torch.rand(batch_size, 1, 1, device=accelerator.device)  
+                    t = time_shift(mu=1.3, sigma=0, t=t_raw)
 
                     # sample & add_noise
                     x_1 = torch.randn_like(tgt_image_latents).to(accelerator.device)
                     x_t = (1 - t) * tgt_image_latents + t * x_1
 
                 # denoise
-                latent_model_input = torch.cat([x_t, src_image_latents, ref_image_latents], dim=1)
-                latent_ids = torch.cat([tgt_image_ids, src_image_ids, ref_image_ids], dim=0)
+                latent_model_input = torch.cat([x_t, src_image_latents], dim=1)
+                latent_ids = torch.cat([tgt_image_ids, src_image_ids], dim=0)
                 guidance = torch.full((x_t.shape[0],), 1, device=x_t.device)
 
                 noise_pred = dit(
                     hidden_states=latent_model_input.to(dtype=weight_dtype),
                     timestep=t.squeeze(1).squeeze(1).to(dtype=weight_dtype),     #[0,1]
                     guidance=guidance.to(dtype=weight_dtype),     #[1.0]
-                    pooled_projections=pooled_prompt_embeds.to(dtype=weight_dtype),
+                    encoder_hidden_states_mask=prompt_embeds_mask,
                     encoder_hidden_states=prompt_embeds.to(dtype=weight_dtype),
-                    txt_ids=text_ids.to(dtype=weight_dtype),
-                    img_ids=latent_ids.to(dtype=weight_dtype),
                     return_dict=False,
                 )[0]
                 noise_pred = noise_pred[:, :x_t.size(1)]
@@ -323,3 +316,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# 1.修改成Qwen-Image-Edit形式
+# 2.修改成NFT形式

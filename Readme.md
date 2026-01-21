@@ -3,9 +3,11 @@ export NCCL_P2P_DISABLE=1
 unset http_proxy
 unset https_proxy
 cd Kontext_train_ds2
-accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2.py --num_epochs 5 --lr 1e-4 --save_steps 500
+accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_replace5k.py --num_epochs 5 --lr 1e-4 --save_steps 500
 
 accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_motionedit.py --num_epochs 5 --lr 1e-4 --save_steps 500
+
+accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_NFT.py --num_epochs 5 --lr 1e-4 --save_steps 500
 
 #异步错误处理
 当一个 GPU 节点发生 NCCL 错误时，其他节点能及时收到通知并优雅退出，而不是一直死等（卡死）。它让错误日志更清晰。
@@ -71,3 +73,5 @@ loss的稳定值比之前从0.14下降到0.1以下，但是出图还是模糊噪
 
 尝试5：对Qwen-Image-Edit进行同样调试，发现同样的问题，所以不可以使用balanced模式
 解决办法：pipeline.enable_model_cpu_offload(gpu_id = gpu_id)，可以节省推理时的gpu显存使用
+
+
