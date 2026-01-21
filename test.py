@@ -83,9 +83,11 @@ def main():
         # data["src_image"].save("./src.jpg")
         # data["ref_image"].save("./ref.jpg")
         src_image = data["input_image"]
+        tgt_image = data["target_image"]
         src_image.save(os.path.join(output_dir, "src.jpg"))
+        tgt_image.save(os.path.join(output_dir, "gt.jpg"))
 
-        with open("./instruction.txt", "w") as f:
+        with open(os.path.join(output_dir, "instruction.txt"), "w") as f:
             f.write(data["prompt"])
 
         image = pipe(
