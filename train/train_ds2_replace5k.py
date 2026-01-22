@@ -93,6 +93,7 @@ def main():
         project_dir=ARGS.output_dir,
     )
     torch.cuda.set_device(accelerator.device)
+
     accelerator.init_trackers("ds2_kontext", config=vars(ARGS))
 
     # Make one log on every process with the configuration for debugging.
@@ -165,7 +166,7 @@ def main():
 
     # 加载数据 
     dataset = Replace5kDataset(json_file="/home/yanzhang/datasets/replace-5k/train.json")
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, drop_last=True)
 
     # Prepare with accelerator
     accelerator.wait_for_everyone()

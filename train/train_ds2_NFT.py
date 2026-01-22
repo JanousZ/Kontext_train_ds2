@@ -125,7 +125,7 @@ def main():
     # 加载预训练模型
     base_model = ARGS.base_model_path
 
-    dit = QwenImageTransformer2DModel.from_pretrained(base_model, subfolder="transformer", low_cpu_mem_usage=True)
+    dit = QwenImageTransformer2DModel.from_pretrained(base_model, subfolder="transformer", torch_dtype = torch.bfloat16)
     vae = AutoencoderKLQwenImage.from_pretrained(base_model, subfolder="vae")
     text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(base_model, subfolder="text_encoder")
     tokenizer = Qwen2Tokenizer.from_pretrained(base_model, subfolder="tokenizer")
