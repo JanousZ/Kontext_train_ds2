@@ -1,9 +1,9 @@
 deepspeed2 + accelerate训练 flux kontext lora（实验性）
 export NCCL_P2P_DISABLE=1
 unset http_proxy  
-export http_proxy="http://10.82.1.241:7890"
+export http_proxy="http://127.0.0.1:7890"
 unset https_proxy  
-export https_proxy="http://10.82.1.241:7890"
+export https_proxy="http://127.0.0.1:7890"
 cd Kontext_train_ds2
 accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_replace5k.py --num_epochs 5 --lr 1e-4 --save_steps 500 > train.log 2>&1
 
@@ -91,7 +91,7 @@ loss的稳定值比之前从0.14下降到0.1以下，但是出图还是模糊噪
 解决办法：pipeline.enable_model_cpu_offload(gpu_id = gpu_id)，可以节省推理时的gpu显存使用
 
 
-accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_NFT.py --num_epochs 5 --lr 1e-4 --save_steps 500
+accelerate launch --config_file ./train/deepspeed.yaml ./train/train_ds2_NFT.py --num_epochs 5 --lr 1e-4 --save_steps 500 > train.log 2>&1
 问题1：当使用cpu offload时，cpu内存不足爆炸导致训练无法进行
 尝试1：关闭ds2配置中optimizer的cpu offload
 结果：问题依旧存在，这是在导入dit时就已经cpu内存爆炸。

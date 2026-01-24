@@ -3,6 +3,11 @@
 Training script for Kontext model with DeepSpeed and Accelerate
 """
 
+import sys
+import os
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 from torch.optim import AdamW
 from accelerate import Accelerator
@@ -10,7 +15,6 @@ from peft import get_peft_model, LoraConfig
 import argparse
 from my_datasets.replace5k import Replace5kDataset
 from torch.utils.data import DataLoader
-import os
 import logging
 from accelerate.logging import get_logger
 import diffusers
@@ -29,7 +33,6 @@ from transformers import (
 from safetensors.torch import save_file, load_file
 import shutil
 from utils.infer_utils import _encode_prompt_with_clip, _encode_prompt_with_t5
-import os
 import math
 
 os.environ["WANDB_API_KEY"] = "86ab58d2a525a27f7a60ab5fa492d36bdf932255"
